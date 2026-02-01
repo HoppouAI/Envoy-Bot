@@ -42,17 +42,21 @@ cd Envoy-Bot
 
 ```bash
 uv venv --python 3.11
+```
 
-```bash
 or without UV:
+```bash
 python -m venv .venv
 ```
 Make sure you have atleast python 3.11 installed.
 
 # Windows
+```bash
 .venv\Scripts\activate
+```
 
 # Unix/macOS
+```bash
 source .venv/bin/activate
 ```
 
@@ -69,7 +73,6 @@ pip install -r requirements.txt
 ### 4. Configure the Bot
 
 Copy the sample configuration and add your Discord token:
-
 
 Edit `config.yml` and replace `YOUR_DISCORD_BOT_TOKEN_HERE` with your actual token.
 
@@ -107,7 +110,7 @@ You should see:
 ```
 [INFO] Starting Envoy bot...
 [INFO] Copilot SDK client initialized
-[INFO] Synced 3 slash commands
+[INFO] Synced 9 slash commands
 [INFO] Logged in as username#1234 (ID: 123456789)
 [INFO] Connected to 1 (or however many its in) guilds
 ```
@@ -147,7 +150,7 @@ You should see:
 
 1. **Send a Request** - Use `/architect` with your description
 2. **Review the Plan** - Envoy generates a detailed execution plan
-3. **Confirm or Cancel** - Click ✅ to execute or ❌ to cancel
+3. **Confirm or Cancel** - Click ✅ to execute or ❌ to cancel or you can sugguest changes
 4. **Execution** - Envoy performs the operations and reports results
 
 ## 🔧 Configuration
@@ -193,68 +196,61 @@ features:
 
 The following models work with the Copilot SDK:
 - `gpt-4.1` (recommended)
-- `gpt-5`
+- `gpt-5-mini`
 - `claude-sonnet-4.5`
+Etc.
 
 Check available models with the Copilot CLI:
 ```bash
-copilot list-models
+copilot
 ```
+then use
+```bash
+/models
+```
+you should recieve a list of available models.
 
 ## 🛠️ Available Tools
 
-Envoy exposes these tools to the AI for function calling:
+Envoy exposes **29 tools** to the AI for function calling:
 
 | Tool | Description |
 |------|-------------|
-| `create_channel` | Create text, voice, or category channels |
-| `create_role` | Create roles with custom permissions and colors |
-| `set_permissions` | Set channel-specific permission overrides |
-| `create_category` | Create a category with multiple child channels |
-| `modify_server_settings` | Change server name, verification level, etc. |
-| `delete_channel` | Remove a channel from the server |
-| `delete_role` | Remove a role from the server |
-| `get_server_info` | Fetch current server structure |
+| `create_channel` | Create a new Discord channel (text, voice, or category) |
+| `create_role` | Create a new Discord role with optional permissions |
+| `create_category` | Create a category with optional child channels |
+| `delete_channel` | Delete a channel from the server |
+| `delete_role` | Delete a role from the server |
+| `delete_category` | Delete a category from the server, optionally deleting all channels inside it |
+| `set_permissions` | Set channel permissions for a specific role or member |
+| `set_category_permissions` | Set permissions on a category for multiple roles and optionally sync to child channels |
+| `make_channel_private` | Make a channel private and restrict access to specific roles |
+| `auto_configure_permissions` | Automatically configure permissions for all categories/channels using templates (sub-agent) |
+| `clone_channel_permissions` | Clone permission overwrites from one channel to another |
+| `edit_channel` | Edit an existing channel's properties (name, topic, slowmode, NSFW) |
+| `edit_role` | Edit an existing role's properties (name, color, permissions, hoist, mentionable) |
+| `move_channel` | Move a channel to a different category and sync permissions |
+| `assign_role` | Assign a role to a server member |
+| `remove_role` | Remove a role from a server member |
+| `bulk_create_roles` | Create multiple roles at once with their permissions and colors |
+| `modify_server_settings` | Modify server settings like name, verification level, AFK, etc. |
+| `get_server_info` | Fetch current server structure (channels, roles) with IDs for mentions |
+| `set_plan` | Set the execution plan for progress tracking (call before executing operations) |
+| `update_task` | Update a task's status in the live progress tracker |
+| `ask_user` | Ask the user a question mid-task and wait for their response |
+| `mark_complete` | Mark a task as complete with a summary (use if you can't perform an action) |
+| `get_design_docs` | Load the Discord design guide used for server aesthetics and naming patterns |
+| `post_embed` | Post a formatted embed via webhook (editable later) |
+| `get_webhook_url` | Get or create the Envoy webhook URL for a channel |
+| `edit_embed` | Edit an existing embed message posted by the Envoy webhook |
+| `delete_embed` | Delete a webhook embed message |
+| `list_embed_messages` | List recent embed messages posted by the Envoy webhook |
 
 ## 🔐 Security Considerations
 
 1. **Permission Hierarchy** - The bot cannot modify roles positioned above its own highest role
 2. **Admin Required** - Only server administrators can use `/architect`
 3. **Confirmation Flow** - All changes require explicit user approval (configurable)
-
-### Recommended .gitignore
-
-```gitignore
-# Configuration with secrets
-config.yml
-
-# Logs
-logs/
-
-# Virtual environment
-venv/
-
-# Python cache
-__pycache__/
-*.pyc
-
-# IDE
-.vscode/
-.idea/
-```
-
-## 📁 Project Structure
-
-```
-Envoy-Bot/
-├── main.py           # Entry point, Discord events, command handling
-├── architect.py      # DiscordArchitect class and tool definitions
-├── config.yml        # Configuration (not committed with secrets)
-├── requirements.txt  # Python dependencies
-├── README.md         # This file
-└── logs/             # Log files (auto-created)
-    └── envoy.log
-```
 
 ## 🐛 Troubleshooting
 
