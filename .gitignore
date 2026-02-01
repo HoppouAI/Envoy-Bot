@@ -179,3 +179,23 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# ================================
+# Envoy Discord Bot Specific
+# ================================
+
+# Logs directory
+logs/
+
+# Copilot SDK session state
+.copilot/
+
+# IDE settings
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+config.yml
+/data

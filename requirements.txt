@@ -1,0 +1,28 @@
+# Envoy Discord Bot - Dependencies
+# =================================
+# Install with: pip install -r requirements.txt
+
+# Discord.py - Discord API wrapper
+# https://github.com/Rapptz/discord.py
+discord.py>=2.3.0
+
+# GitHub Copilot SDK - AI/LLM Engine
+# https://github.com/github/copilot-sdk
+github-copilot-sdk>=0.1.0
+
+# PyYAML - Configuration file parsing
+# https://pyyaml.org/
+PyYAML>=6.0
+
+# Pydantic - Data validation for tool parameters
+# https://docs.pydantic.dev/
+pydantic>=2.0.0
+
+# Optional: Development dependencies
+# Uncomment if needed for development
+
+# pytest>=7.0.0          # Testing framework
+# pytest-asyncio>=0.21.0 # Async test support
+# black>=23.0.0          # Code formatting
+# ruff>=0.1.0            # Fast linter
+# mypy>=1.5.0            # Type checking
