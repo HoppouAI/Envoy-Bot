@@ -2,9 +2,6 @@
 
 Envoy is an AI-powered Discord bot that autonomously configures and manages Discord servers based on natural language commands. Powered by the **GitHub Copilot SDK**, Envoy interprets your requests, generates execution plans, and performs Discord API operations through intelligent function calling.
 
-# Our official bot on discord is Envoy#5176
-- Never use any other bot claiming to be the official Envoy as it could be malicious and nuke your server.
-
 # Security warning:
 - This bot has powerful permissions and can modify your server structure. Only the server owner may execute the architect command, You need to be authorized to use the commands by the owner of the Server.
 - This bot can nuke your server if given malicious instructions. Use with caution, We are not responsible for any damage caused by misuse of this bot or vulnerabilities in the AI model.
