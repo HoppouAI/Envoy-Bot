@@ -592,14 +592,6 @@ class ContinuationConfirmView(View):
         button: Button,
     ) -> None:
         """Handle execute button click - runs the proposed plan."""
-        # Update embed to show executing state
-        executing_embed = discord.Embed(
-            title="⚡ Executing Plan...",
-            description="Please wait while I make the changes.",
-            color=discord.Color.gold(),
-        )
-        await interaction.response.edit_message(embed=executing_embed, view=None)
-
         try:
             # Get context
             context = self.bot._session_contexts.get(self.guild_id, {})
@@ -615,6 +607,32 @@ class ContinuationConfirmView(View):
                     ),
                 )
                 self.bot._architects[self.guild_id] = architect
+
+            # Get or create log channel for progress tracking
+            log_channel = await self.bot.get_or_create_log_channel(interaction.guild)
+            
+            # Set up progress tracker for live updates
+            if log_channel:
+                architect.progress_tracker.set_channel(log_channel)
+                architect.progress_tracker.reset()
+                # Send initial progress embed
+                progress_msg = await architect.progress_tracker.send_initial()
+                
+                # Update button embed to point to progress tracker
+                executing_embed = discord.Embed(
+                    title="⚡ Executing Plan...",
+                    description=f"Live progress updates in {log_channel.mention}\n\n[Jump to Progress →]({progress_msg.jump_url if progress_msg else log_channel.mention})",
+                    color=discord.Color.gold(),
+                )
+            else:
+                # Fallback if no log channel
+                executing_embed = discord.Embed(
+                    title="⚡ Executing Plan...",
+                    description="Please wait while I make the changes.",
+                    color=discord.Color.gold(),
+                )
+            
+            await interaction.response.edit_message(embed=executing_embed, view=None)
 
             # Build execution prompt
             context_summary = ""
@@ -676,12 +694,36 @@ class ContinuationConfirmView(View):
             if len(full_response) > 4000:
                 full_response = full_response[:4000] + "\n\n*(truncated)*"
 
+            # Get execution log for detailed actions
+            exec_log = architect.get_execution_log()
+            
             # Create completion embed
+            description_parts = []
+            if full_response:
+                description_parts.append(full_response)
+            else:
+                description_parts.append("Changes applied successfully!")
+            
+            # Add link to progress tracker if available
+            if log_channel and architect.progress_tracker.message:
+                description_parts.append(f"\n\n📊 [View Detailed Progress]({architect.progress_tracker.message.jump_url})")
+            
             completion_embed = discord.Embed(
                 title="✅ Plan Executed",
-                description=full_response if full_response else "Changes applied successfully!",
+                description="\n".join(description_parts),
                 color=discord.Color.green(),
             )
+            
+            # Add summary of completed actions
+            if exec_log:
+                success_count = sum(1 for _, success in exec_log if success)
+                failed_count = sum(1 for _, success in exec_log if not success)
+                completion_embed.add_field(
+                    name="Summary",
+                    value=f"✅ {success_count} successful | {'❌ ' + str(failed_count) + ' failed' if failed_count > 0 else ''}",
+                    inline=False
+                )
+            
             completion_embed.set_footer(text="Reply to this message to continue")
 
             await interaction.message.edit(embed=completion_embed)
@@ -689,11 +731,10 @@ class ContinuationConfirmView(View):
             # Track this message for continuations
             self.bot._summary_messages[interaction.message.id] = self.guild_id
 
-            # Update context
+            # Update context (exec_log was already retrieved above)
             if self.guild_id not in self.bot._session_contexts:
                 self.bot._session_contexts[self.guild_id] = {"actions": [], "last_response": ""}
             
-            exec_log = architect.get_execution_log()
             if exec_log:
                 formatted_actions = [f"{msg} {'(failed)' if not success else ''}".strip() for msg, success in exec_log]
                 self.bot._session_contexts[self.guild_id]["actions"].extend(formatted_actions)

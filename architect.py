@@ -159,9 +159,13 @@ class ModifyServerSettingsParams(BaseModel):
         default=None,
         description="New server name"
     )
-    description: Optional[str] = Field(
+    icon_url: Optional[str] = Field(
         default=None,
-        description="New server description"
+        description="URL to image for server icon/logo. Must be a direct image URL (png, jpg, gif). Image will be downloaded and set as server icon."
+    )
+    banner_url: Optional[str] = Field(
+        default=None,
+        description="URL to image for server banner. Requires server boost level 2+. Must be a direct image URL (png, jpg, gif)."
     )
     verification_level: Optional[str] = Field(
         default=None,
@@ -405,6 +409,13 @@ class MarkCompleteParams(BaseModel):
     details: Optional[str] = Field(
         default=None,
         description="Optional detailed explanation of what was done"
+    )
+
+
+class GetDesignSectionParams(BaseModel):
+    """Parameters for getting a design documentation section."""
+    section: str = Field(
+        description="Section name to retrieve: 'Script Fonts', 'Gothic Fonts', 'Sans-Serif Fonts', 'Serif Fonts', 'Special Fonts', 'Separators', 'Decorative Elements', 'Category Patterns', 'Channel Patterns', 'Gaming Template', 'Professional Template', 'Tech Template', 'Aesthetic Template', 'Kawaii Template', 'Emoji Guidelines', 'Color Palettes', 'Description Formats', 'Best Practices', 'Templates', or 'All' for entire guide"
     )
 
 
@@ -1582,13 +1593,50 @@ class DiscordArchitect:
         await self.rate_limiter.acquire()
 
         try:
+            import aiohttp
+            
             kwargs: dict[str, Any] = {}
 
             if params.name:
                 kwargs["name"] = params.name
-
-            if params.description:
-                kwargs["description"] = params.description
+            
+            # Handle icon URL
+            if params.icon_url:
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(params.icon_url) as resp:
+                            if resp.status == 200:
+                                icon_bytes = await resp.read()
+                                kwargs["icon"] = icon_bytes
+                                logger.info(f"Downloaded server icon from {params.icon_url} ({len(icon_bytes)} bytes)")
+                            else:
+                                logger.warning(f"Failed to download icon from {params.icon_url}: HTTP {resp.status}")
+                                return ToolResult(False, f"Failed to download icon: HTTP {resp.status}")
+                except Exception as e:
+                    logger.error(f"Error downloading icon from {params.icon_url}: {e}")
+                    return ToolResult(False, f"Error downloading icon: {str(e)}")
+            
+            # Handle banner URL
+            if params.banner_url:
+                # Check if server has required boost level for banner
+                if self.guild.premium_tier < 2:
+                    msg = f"Server banner requires boost level 2 or higher (current: {self.guild.premium_tier})"
+                    logger.warning(msg)
+                    return ToolResult(False, msg)
+                
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(params.banner_url) as resp:
+                            if resp.status == 200:
+                                banner_bytes = await resp.read()
+                                kwargs["banner"] = banner_bytes
+                                logger.info(f"Downloaded server banner from {params.banner_url} ({len(banner_bytes)} bytes)")
+                            else:
+                                logger.warning(f"Failed to download banner from {params.banner_url}: HTTP {resp.status}")
+                                return ToolResult(False, f"Failed to download banner: HTTP {resp.status}")
+                except Exception as e:
+                    logger.error(f"Error downloading banner from {params.banner_url}: {e}")
+                    return ToolResult(False, f"Error downloading banner: {str(e)}")
 
             if params.verification_level:
                 level_map = {
@@ -1892,6 +1940,26 @@ class DiscordArchitect:
                 if r.name != "@everyone"
             ]
 
+            # Get additional server metadata
+            features = list(self.guild.features) if self.guild.features else []
+            description = self.guild.description or ""
+            preferred_locale = str(self.guild.preferred_locale) if self.guild.preferred_locale else "en-US"
+            
+            # Determine server type/purpose from features and other metadata
+            server_type_hints = []
+            if "COMMUNITY" in features:
+                server_type_hints.append("Community Server")
+            if "PARTNERED" in features:
+                server_type_hints.append("Partnered")
+            if "VERIFIED" in features:
+                server_type_hints.append("Verified")
+            if "DISCOVERABLE" in features:
+                server_type_hints.append("Discoverable")
+            if "WELCOME_SCREEN_ENABLED" in features:
+                server_type_hints.append("Has Welcome Screen")
+            if "THREADS_ENABLED" in features:
+                server_type_hints.append("Threads Enabled")
+
             msg = "Fetched server information"
             self._log_action(msg, True)
             return ToolResult(
@@ -1900,12 +1968,21 @@ class DiscordArchitect:
                 {
                     "name": self.guild.name,
                     "id": self.guild.id,
+                    "description": description,
                     "member_count": self.guild.member_count,
+                    "preferred_locale": preferred_locale,
+                    "features": features,
+                    "server_type": ", ".join(server_type_hints) if server_type_hints else "Standard Server",
                     "categories": categories,
                     "text_channels": text_channels,
                     "voice_channels": voice_channels,
                     "roles": roles,
                     "verification_level": str(self.guild.verification_level),
+                    "boost_level": self.guild.premium_tier,
+                    "boost_count": self.guild.premium_subscription_count or 0,
+                    "max_members": self.guild.max_members or "Unknown",
+                    "icon_url": str(self.guild.icon.url) if self.guild.icon else None,
+                    "banner_url": str(self.guild.banner.url) if self.guild.banner else None,
                 },
             )
 
@@ -3682,7 +3759,7 @@ def create_architect_tools(architect: DiscordArchitect) -> list:
         return response
 
     @define_tool(
-        description="Modify server settings like name, verification level, etc."
+        description="Modify server settings like name, icon/logo, banner (boost level 2+), verification level, etc. Provide image URLs to set server icon or banner."
     )
     async def modify_server_settings(params: ModifyServerSettingsParams) -> str:
         """Modify guild-level settings."""
@@ -3714,7 +3791,7 @@ def create_architect_tools(architect: DiscordArchitect) -> list:
         return f"{'✅' if result.success else '❌'} {result.message}"
 
     @define_tool(
-        description="Get current server information including channels, roles, and settings. Returns IDs that can be used for mentions: <#ID> for channels, <@&ID> for roles"
+        description="Get current server information including channels, roles, settings, description, features, and metadata. Use this to understand the server's purpose and tailor your configuration. Returns IDs that can be used for mentions: <#ID> for channels, <@&ID> for roles"
     )
     async def get_server_info() -> str:
         """Get server information."""
@@ -3723,8 +3800,33 @@ def create_architect_tools(architect: DiscordArchitect) -> list:
             # Format with mention hints
             data = result.data
             lines = [f"**Server:** {data['name']} (ID: {data['id']})"]
-            lines.append(f"**Members:** {data['member_count']}")
+            
+            # Add description if available
+            if data.get('description'):
+                lines.append(f"**Description:** {data['description']}")
+            
+            lines.append(f"**Server Type:** {data.get('server_type', 'Standard Server')}")
+            lines.append(f"**Members:** {data['member_count']} (Max: {data.get('max_members', 'Unknown')})")
             lines.append(f"**Verification:** {data['verification_level']}")
+            lines.append(f"**Preferred Language:** {data.get('preferred_locale', 'en-US')}")
+            
+            # Boost information
+            boost_level = data.get('boost_level', 0)
+            boost_count = data.get('boost_count', 0)
+            if boost_level > 0:
+                lines.append(f"**Boost Status:** Level {boost_level} ({boost_count} boosts)")
+            
+            # Server features
+            features = data.get('features', [])
+            if features:
+                # Show most relevant features
+                important_features = [f for f in features if f in [
+                    'COMMUNITY', 'PARTNERED', 'VERIFIED', 'DISCOVERABLE',
+                    'WELCOME_SCREEN_ENABLED', 'THREADS_ENABLED', 'NEWS',
+                    'ANIMATED_ICON', 'BANNER', 'VANITY_URL', 'COMMERCE'
+                ]]
+                if important_features:
+                    lines.append(f"**Features:** {', '.join(important_features)}")
             
             lines.append("\n**Categories:**")
             for cat in data.get('categories', []):
@@ -3743,6 +3845,9 @@ def create_architect_tools(architect: DiscordArchitect) -> list:
             lines.append("\n**Roles:** (use <@&ID> to mention)")
             for role in sorted(data.get('roles', []), key=lambda r: -r['position']):
                 lines.append(f"  • {role['name']} ({role['color']}) | <@&{role['id']}>")
+            
+            # Add a note about using this info
+            lines.append("\n💡 **Tip:** Use the server description, features, and existing structure to inform your design decisions.")
             
             return "\n".join(lines)
         return f"❌ {result.message}"
@@ -3884,24 +3989,168 @@ def create_architect_tools(architect: DiscordArchitect) -> list:
     # ========== Design Reference Tools ==========
 
     @define_tool(
-        description="**CALL THIS FIRST** before creating servers! Gets Discord design documentation with Unicode fonts, category name styles, channel naming patterns, emoji prefixes, color palettes, and complete server templates. REQUIRED for polished-looking servers."
+        description="**CALL THIS FIRST** when working on server design! Lists all available design sections including font styles (Script, Gothic, Sans-Serif, Serif, Special), decorative elements, templates, naming patterns, and more. Use this to see what's available, then fetch specific sections with get_design_section."
     )
-    async def get_design_docs() -> str:
-        """Fetch the Discord design guide for creating aesthetic servers."""
+    async def list_design_sections() -> str:
+        """List all available design documentation sections."""
         import os
-        logger.info("get_design_docs tool called - loading design documentation")
+        logger.info("list_design_sections tool called")
         docs_path = os.path.join(os.path.dirname(__file__), "docs", "discord_design_guide.md")
         try:
             with open(docs_path, "r", encoding="utf-8") as f:
                 content = f.read()
-            logger.info(f"Design docs loaded successfully ({len(content)} characters)")
-            return f"✅ Design documentation loaded ({len(content)} chars). Use these patterns:\n\n{content}"
+            
+            # Parse sections from the markdown
+            sections = []
+            current_section = None
+            
+            for line in content.split('\n'):
+                # Main headers (# or ##)
+                if line.startswith('### '):
+                    # Subsections
+                    subsection = line.replace('### ', '').strip()
+                    if current_section:
+                        sections.append(f"{current_section} > {subsection}")
+                elif line.startswith('## '):
+                    # Major sections
+                    current_section = line.replace('## ', '').strip()
+                    sections.append(current_section)
+                elif line.startswith('# '):
+                    # Title - skip
+                    continue
+            
+            # Build categorized list
+            result = ["✅ Available Design Sections:", ""]
+            result.append("**Font Styles:**")
+            result.append("  • Script/Cursive Fonts (Bold Script, Light Script)")
+            result.append("  • Gothic/Fraktur Fonts (Gothic, Bold Fraktur)")
+            result.append("  • Sans-Serif Fonts (Bold Sans, Italic Sans, Bold Italic Sans)")
+            result.append("  • Serif Fonts (Bold Serif, Italic Serif, Bold Italic)")
+            result.append("  • Special Style Fonts (Double-struck, Fullwidth, Monospace, Small Caps, Circled, etc.)")
+            result.append("")
+            result.append("**Design Elements:**")
+            result.append("  • Separator & Line Characters")
+            result.append("  • Aesthetic Decorative Elements")
+            result.append("  • Emoji Guidelines by Channel Type")
+            result.append("  • Role Color Palettes")
+            result.append("")
+            result.append("**Naming Patterns:**")
+            result.append("  • Category Naming Patterns")
+            result.append("  • Channel Naming Patterns")
+            result.append("  • Server Description Formats")
+            result.append("")
+            result.append("**Complete Templates:**")
+            result.append("  • Gaming Community Template")
+            result.append("  • Aesthetic/Chill Template")
+            result.append("  • Professional/Business Template")
+            result.append("  • Development/Tech Template")
+            result.append("  • AI/Tech Hub Template")
+            result.append("  • Kawaii/Cute Template")
+            result.append("")
+            result.append("**Best Practices:**")
+            result.append("  • Design Best Practices")
+            result.append("")
+            result.append("💡 Use `get_design_section` with section names like 'Script Fonts', 'Gaming Community Template', 'Emoji Guidelines', etc.")
+            
+            logger.info(f"Listed {len(sections)} design sections")
+            return "\n".join(result)
+            
         except FileNotFoundError:
             logger.warning("Design documentation file not found")
-            return "❌ Design documentation not found at docs/discord_design_guide.md. Using default aesthetic patterns."
+            return "❌ Design documentation not found at docs/discord_design_guide.md"
         except Exception as e:
             logger.error(f"Error loading design docs: {e}")
             return f"❌ Error loading design docs: {str(e)}"
+
+    @define_tool(
+        description="Get a specific section of the design documentation. Section names: 'Script Fonts', 'Gothic Fonts', 'Sans-Serif Fonts', 'Serif Fonts', 'Special Fonts', 'Separators', 'Decorative Elements', 'Category Patterns', 'Channel Patterns', 'Gaming Template', 'Professional Template', 'Tech Template', 'Aesthetic Template', 'Kawaii Template', 'Emoji Guidelines', 'Color Palettes', 'Description Formats', 'Best Practices', or 'All' for entire guide."
+    )
+    async def get_design_section(params: GetDesignSectionParams) -> str:
+        """Fetch a specific section from the Discord design guide."""
+        import os
+        import re
+        logger.info(f"get_design_section tool called - section: '{params.section}'")
+        docs_path = os.path.join(os.path.dirname(__file__), "docs", "discord_design_guide.md")
+        try:
+            with open(docs_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            
+            section_lower = params.section.lower()
+            
+            # Return full guide if requested
+            if section_lower in ['all', 'full', 'complete', 'everything']:
+                logger.info(f"Returning full design guide ({len(content)} characters)")
+                return f"✅ Full Design Guide:\n\n{content}"
+            
+            # Define section patterns and their corresponding regex
+            section_patterns = {
+                'script': (r'### Script/Cursive Fonts.*?(?=###|\Z)', 'Script/Cursive Fonts'),
+                'gothic': (r'### Gothic/Fraktur Fonts.*?(?=###|\Z)', 'Gothic/Fraktur Fonts'),
+                'sans': (r'### Sans-Serif Fonts.*?(?=###|\Z)', 'Sans-Serif Fonts'),
+                'serif': (r'### Serif Fonts.*?(?=###|\Z)', 'Serif Fonts'),
+                'special': (r'### Special Style Fonts.*?(?=###|\Z)', 'Special Style Fonts'),
+                'separator': (r'## Separator & Line Characters.*?(?=##|\Z)', 'Separators & Lines'),
+                'decorative': (r'## Aesthetic Decorative Elements.*?(?=##|\Z)', 'Decorative Elements'),
+                'category': (r'## Category Naming Patterns.*?(?=##|\Z)', 'Category Naming Patterns'),
+                'channel': (r'## Channel Naming Patterns.*?(?=##|\Z)', 'Channel Naming Patterns'),
+                'gaming': (r'### Gaming Community Template.*?(?=###|\Z)', 'Gaming Community Template'),
+                'aesthetic': (r'### Aesthetic/Chill Template.*?(?=###|\Z)', 'Aesthetic/Chill Template'),
+                'professional': (r'### Professional/Business Template.*?(?=###|\Z)', 'Professional/Business Template'),
+                'tech': (r'### Development/Tech Template.*?(?=###|\Z)', 'Development/Tech Template'),
+                'ai': (r'### AI/Tech Hub Template.*?(?=###|\Z)', 'AI/Tech Hub Template'),
+                'kawaii': (r'### Kawaii/Cute Template.*?(?=###|\Z)', 'Kawaii/Cute Template'),
+                'emoji': (r'## Emoji Guidelines by Channel Type.*?(?=##|\Z)', 'Emoji Guidelines'),
+                'color': (r'## Role Color Palettes.*?(?=##|\Z)', 'Role Color Palettes'),
+                'description': (r'## Server Description Formats.*?(?=##|\Z)', 'Server Description Formats'),
+                'best': (r'## Design Best Practices.*?(?=##|\Z)', 'Design Best Practices'),
+                'templates': (r'## Complete Server Templates.*?(?=##|\Z)', 'Complete Server Templates'),
+            }
+            
+            # Find matching pattern
+            for key, (pattern, display_name) in section_patterns.items():
+                if key in section_lower or section_lower in display_name.lower():
+                    match = re.search(pattern, content, re.DOTALL)
+                    if match:
+                        section_content = match.group(0).strip()
+                        logger.info(f"Found section '{display_name}' ({len(section_content)} characters)")
+                        return f"✅ {display_name}:\n\n{section_content}"
+            
+            # If no match found, try broader search
+            lines = content.split('\n')
+            section_start = None
+            section_content_lines = []
+            
+            for i, line in enumerate(lines):
+                if section_lower in line.lower():
+                    if line.startswith('#'):
+                        section_start = i
+                        section_content_lines = [line]
+                        continue
+                
+                if section_start is not None:
+                    # Stop at next same-level or higher header
+                    if line.startswith('#'):
+                        header_level = len(line) - len(line.lstrip('#'))
+                        start_level = len(lines[section_start]) - len(lines[section_start].lstrip('#'))
+                        if header_level <= start_level:
+                            break
+                    section_content_lines.append(line)
+            
+            if section_content_lines:
+                result = '\n'.join(section_content_lines).strip()
+                logger.info(f"Found matching section ({len(result)} characters)")
+                return f"✅ Section Match:\n\n{result}"
+            
+            # No match found
+            logger.warning(f"Section '{params.section}' not found")
+            return f"❌ Section '{params.section}' not found. Use `list_design_sections` to see available sections."
+            
+        except FileNotFoundError:
+            logger.warning("Design documentation file not found")
+            return "❌ Design documentation not found at docs/discord_design_guide.md"
+        except Exception as e:
+            logger.error(f"Error loading design section: {e}")
+            return f"❌ Error loading design section: {str(e)}"
 
     # ========== Webhook & Embed Tools ==========
 
@@ -3990,7 +4239,8 @@ def create_architect_tools(architect: DiscordArchitect) -> list:
         ask_user,
         mark_complete,
         # Design reference
-        get_design_docs,
+        list_design_sections,
+        get_design_section,
         # Webhook & embed
         post_embed,
         get_webhook_url,
