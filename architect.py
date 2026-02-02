@@ -915,12 +915,10 @@ class DiscordArchitect:
         self.guild = guild
         self.rate_limiter = rate_limiter or RateLimiter()
         self.allow_unsafe_role_ops = allow_unsafe_role_ops
-        self._execution_log: list[str] = []
+        self._execution_log: list[tuple[str, bool]] = []
         self.progress_tracker = ProgressTracker()
-        # Session-level cache of created objects to handle Discord cache lag
         self._created_channels: dict[str, discord.abc.GuildChannel] = {}
         self._created_roles: dict[str, Role] = {}
-        # Question/answer system for mid-task user input
         self._pending_question: Optional[dict[str, Any]] = None
         self._question_event = asyncio.Event()
         self._question_answer: Optional[str] = None
@@ -938,16 +936,15 @@ class DiscordArchitect:
             return self.bot_member.top_role
         return None
 
-    def _log_action(self, message: str) -> None:
+    def _log_action(self, message: str, success: bool = True) -> None:
         """Log an action for tracking."""
-        logger.info(message)
-        self._execution_log.append(message)
+        logger.info(f"[{'SUCCESS' if success else 'FAILED'}] {message}")
+        self._execution_log.append((message, success))
 
-    def get_execution_log(self) -> list[str]:
+    def get_execution_log(self) -> list[tuple[str, bool]]:
         """Get the execution log and clear it."""
         log = self._execution_log.copy()
         self._execution_log.clear()
-        # Also clear session cache since execution is complete
         self.clear_session_cache()
         return log
     
@@ -1066,32 +1063,24 @@ class DiscordArchitect:
         Returns:
             ToolResult with success status and channel info.
         """
-        self._log_action(f"Creating {params.channel_type} channel: {params.name}")
-
-        # Check if channel already exists (in same category if specified)
         channel_type = params.channel_type.lower()
         type_class = TextChannel if channel_type == "text" else VoiceChannel if channel_type == "voice" else CategoryChannel
         existing = self._find_channel_by_name(params.name, type_class)
         if existing:
-            # If category specified, check if it's in the same category
             if params.category_name:
                 if hasattr(existing, 'category') and existing.category:
                     if existing.category.name.lower() == params.category_name.lower():
-                        return ToolResult(
-                            True,
-                            f"Channel '{params.name}' already exists in '{params.category_name}' (ID: {existing.id})",
-                            {"channel_id": existing.id, "already_existed": True}
-                        )
+                        msg = f"Channel '{params.name}' already exists in '{params.category_name}' (ID: {existing.id})"
+                        self._log_action(f"Creating {params.channel_type} channel: {params.name}", True)
+                        return ToolResult(True, msg, {"channel_id": existing.id, "already_existed": True})
             else:
-                return ToolResult(
-                    True,
-                    f"Channel '{params.name}' already exists (ID: {existing.id})",
-                    {"channel_id": existing.id, "already_existed": True}
-                )
+                msg = f"Channel '{params.name}' already exists (ID: {existing.id})"
+                self._log_action(f"Creating {params.channel_type} channel: {params.name}", True)
+                return ToolResult(True, msg, {"channel_id": existing.id, "already_existed": True})
 
-        # Check permissions
         has_perms, error = self._check_permissions("manage_channels")
         if not has_perms:
+            self._log_action(f"Creating {params.channel_type} channel: {params.name}", False)
             return ToolResult(False, error)
 
         await self.rate_limiter.acquire()
@@ -1212,16 +1201,18 @@ class DiscordArchitect:
             if params.allowed_roles:
                 access_info += f" [allowed: {', '.join(params.allowed_roles)}]"
 
-            return ToolResult(
-                True,
-                f"Created {channel_type} channel '{channel.name}'{access_info}",
-                {"channel_id": channel.id, "channel_name": channel.name},
-            )
+            msg = f"Created {channel_type} channel '{channel.name}'{access_info}"
+            self._log_action(msg, True)
+            return ToolResult(True, msg, {"channel_id": channel.id, "channel_name": channel.name})
 
         except Forbidden:
-            return ToolResult(False, "Bot lacks permission to create channels")
+            msg = "Bot lacks permission to create channels"
+            self._log_action(f"Creating {params.channel_type} channel: {params.name}", False)
+            return ToolResult(False, msg)
         except HTTPException as e:
-            return ToolResult(False, f"Discord API error: {e.text}")
+            msg = f"Discord API error: {e.text}"
+            self._log_action(f"Creating {params.channel_type} channel: {params.name}", False)
+            return ToolResult(False, msg)
 
     async def create_role(self, params: CreateRoleParams) -> ToolResult:
         """
@@ -1233,20 +1224,21 @@ class DiscordArchitect:
         Returns:
             ToolResult with success status and role info.
         """
-        self._log_action(f"Creating role: {params.name}")
-
         # Check if role already exists
         existing = self._find_role_by_name(params.name)
         if existing:
+            msg = f"Role '{params.name}' already exists (ID: {existing.id})"
+            self._log_action(msg, True)
             return ToolResult(
                 True,
-                f"Role '{params.name}' already exists (ID: {existing.id})",
+                msg,
                 {"role_id": existing.id, "already_existed": True}
             )
 
         # Check permissions
         has_perms, error = self._check_permissions("manage_roles")
         if not has_perms:
+            self._log_action(f"Creating role '{params.name}': {error}", False)
             return ToolResult(False, error)
 
         await self.rate_limiter.acquire()
@@ -1277,16 +1269,22 @@ class DiscordArchitect:
             self._created_roles[role.name.lower()] = role
             logger.debug(f"Added role '{role.name}' to session cache")
 
+            msg = f"Created role '{role.name}'"
+            self._log_action(msg, True)
             return ToolResult(
                 True,
-                f"Created role '{role.name}'",
+                msg,
                 {"role_id": role.id, "role_name": role.name},
             )
 
         except Forbidden:
-            return ToolResult(False, "Bot lacks permission to create roles")
+            msg = "Bot lacks permission to create roles"
+            self._log_action(f"Creating role '{params.name}': {msg}", False)
+            return ToolResult(False, msg)
         except HTTPException as e:
-            return ToolResult(False, f"Discord API error: {e.text}")
+            msg = f"Discord API error: {e.text}"
+            self._log_action(f"Creating role '{params.name}': {msg}", False)
+            return ToolResult(False, msg)
 
     async def set_permissions(self, params: SetPermissionsParams) -> ToolResult:
         """
@@ -1298,13 +1296,10 @@ class DiscordArchitect:
         Returns:
             ToolResult with success status.
         """
-        self._log_action(
-            f"Setting permissions on '{params.channel_name}' for {params.target_name}"
-        )
-
         # Check permissions
         has_perms, error = self._check_permissions("manage_channels", "manage_roles")
         if not has_perms:
+            self._log_action(f"Setting permissions on '{params.channel_name}' for '{params.target_name}': {error}", False)
             return ToolResult(False, error)
 
         await self.rate_limiter.acquire()
@@ -1313,19 +1308,17 @@ class DiscordArchitect:
             # Find channel
             channel = self._find_channel_by_name(params.channel_name)
             if not channel:
-                return ToolResult(
-                    False,
-                    f"Channel '{params.channel_name}' not found"
-                )
+                msg = f"Channel '{params.channel_name}' not found"
+                self._log_action(f"Setting permissions: {msg}", False)
+                return ToolResult(False, msg)
 
             # Find target
             if params.target_type.lower() == "role":
                 target = self._find_role_by_name(params.target_name)
                 if not target:
-                    return ToolResult(
-                        False,
-                        f"Role '{params.target_name}' not found"
-                    )
+                    msg = f"Role '{params.target_name}' not found"
+                    self._log_action(f"Setting permissions: {msg}", False)
+                    return ToolResult(False, msg)
             else:
                 # Find member by name or display name
                 target = discord.utils.find(
@@ -1334,10 +1327,9 @@ class DiscordArchitect:
                     self.guild.members,
                 )
                 if not target:
-                    return ToolResult(
-                        False,
-                        f"Member '{params.target_name}' not found"
-                    )
+                    msg = f"Member '{params.target_name}' not found"
+                    self._log_action(f"Setting permissions: {msg}", False)
+                    return ToolResult(False, msg)
 
             # Build overwrite
             overwrite = PermissionOverwrite()
@@ -1355,15 +1347,18 @@ class DiscordArchitect:
 
             await channel.set_permissions(target, overwrite=overwrite)
 
-            return ToolResult(
-                True,
-                f"Set permissions on '{channel.name}' for '{params.target_name}'",
-            )
+            msg = f"Set permissions on '{channel.name}' for '{params.target_name}'"
+            self._log_action(msg, True)
+            return ToolResult(True, msg)
 
         except Forbidden:
-            return ToolResult(False, "Bot lacks permission to modify permissions")
+            msg = "Bot lacks permission to modify permissions"
+            self._log_action(f"Setting permissions on '{params.channel_name}': {msg}", False)
+            return ToolResult(False, msg)
         except HTTPException as e:
-            return ToolResult(False, f"Discord API error: {e.text}")
+            msg = f"Discord API error: {e.text}"
+            self._log_action(f"Setting permissions on '{params.channel_name}': {msg}", False)
+            return ToolResult(False, msg)
 
     async def create_category(self, params: CreateCategoryParams) -> ToolResult:
         """
@@ -1375,7 +1370,6 @@ class DiscordArchitect:
         Returns:
             ToolResult with success status and created items.
         """
-        self._log_action(f"Creating category: {params.name}")
         logger.debug(f"create_category called with params: name='{params.name}', private={params.private}, allowed_roles={params.allowed_roles}, denied_roles={params.denied_roles}, channels={params.channels}")
 
         # Check if category already exists
@@ -1383,9 +1377,11 @@ class DiscordArchitect:
         existing = self._find_channel_by_name(params.name, CategoryChannel)
         if existing:
             logger.debug(f"Category '{params.name}' already exists with ID {existing.id}")
+            msg = f"Category '{params.name}' already exists (ID: {existing.id})"
+            self._log_action(msg, True)
             return ToolResult(
                 True,
-                f"Category '{params.name}' already exists (ID: {existing.id})",
+                msg,
                 {"category_id": existing.id, "already_existed": True}
             )
 
@@ -1394,6 +1390,7 @@ class DiscordArchitect:
         has_perms, error = self._check_permissions("manage_channels")
         if not has_perms:
             logger.error(f"Permission check failed: {error}")
+            self._log_action(f"Creating category '{params.name}': {error}", False)
             return ToolResult(False, error)
         logger.debug("Permission check passed")
 
@@ -1535,6 +1532,7 @@ class DiscordArchitect:
             if failed_channels:
                 msg += f" ({len(failed_channels)} failed: {', '.join(failed_channels)})"
 
+            self._log_action(msg, True)
             return ToolResult(
                 True,
                 msg,
@@ -1548,13 +1546,19 @@ class DiscordArchitect:
 
         except Forbidden as e:
             logger.error(f"Forbidden error creating category '{params.name}': {e}")
-            return ToolResult(False, f"Bot lacks permission to create channels: {e}")
+            msg = f"Bot lacks permission to create channels: {e}"
+            self._log_action(f"Creating category '{params.name}': {msg}", False)
+            return ToolResult(False, msg)
         except HTTPException as e:
             logger.error(f"HTTPException creating category '{params.name}': status={e.status}, code={e.code}, text={e.text}")
-            return ToolResult(False, f"Discord API error: {e.text}")
+            msg = f"Discord API error: {e.text}"
+            self._log_action(f"Creating category '{params.name}': {msg}", False)
+            return ToolResult(False, msg)
         except Exception as e:
             logger.exception(f"Unexpected error creating category '{params.name}': {e}")
-            return ToolResult(False, f"Unexpected error: {str(e)}")
+            msg = f"Unexpected error: {str(e)}"
+            self._log_action(f"Creating category '{params.name}': {msg}", False)
+            return ToolResult(False, msg)
 
     async def modify_server_settings(
         self,
@@ -1569,11 +1573,10 @@ class DiscordArchitect:
         Returns:
             ToolResult with success status.
         """
-        self._log_action("Modifying server settings")
-
         # Check permissions
         has_perms, error = self._check_permissions("manage_guild")
         if not has_perms:
+            self._log_action(f"Modifying server settings: {error}", False)
             return ToolResult(False, error)
 
         await self.rate_limiter.acquire()
@@ -1628,19 +1631,24 @@ class DiscordArchitect:
                     kwargs["system_channel"] = sys_ch
 
             if not kwargs:
-                return ToolResult(False, "No valid settings to modify")
+                msg = "No valid settings to modify"
+                self._log_action(f"Modifying server settings: {msg}", False)
+                return ToolResult(False, msg)
 
             await self.guild.edit(**kwargs)
 
-            return ToolResult(
-                True,
-                f"Modified server settings: {', '.join(kwargs.keys())}",
-            )
+            msg = f"Modified server settings: {', '.join(kwargs.keys())}"
+            self._log_action(msg, True)
+            return ToolResult(True, msg)
 
         except Forbidden:
-            return ToolResult(False, "Bot lacks permission to modify server settings")
+            msg = "Bot lacks permission to modify server settings"
+            self._log_action(f"Modifying server settings: {msg}", False)
+            return ToolResult(False, msg)
         except HTTPException as e:
-            return ToolResult(False, f"Discord API error: {e.text}")
+            msg = f"Discord API error: {e.text}"
+            self._log_action(f"Modifying server settings: {msg}", False)
+            return ToolResult(False, msg)
 
     async def delete_channel(self, params: DeleteChannelParams) -> ToolResult:
         """
@@ -1652,18 +1660,16 @@ class DiscordArchitect:
         Returns:
             ToolResult with success status.
         """
-        self._log_action(f"Deleting channel: {params.name}")
-
         # Protect the envoy-summary channel from deletion
         if params.name.lower() == "envoy-summary":
-            return ToolResult(
-                False,
-                "Cannot delete 'envoy-summary' channel - it's required for bot operation"
-            )
+            msg = "Cannot delete 'envoy-summary' channel - it's required for bot operation"
+            self._log_action(f"Deleting channel '{params.name}': {msg}", False)
+            return ToolResult(False, msg)
 
         # Check permissions
         has_perms, error = self._check_permissions("manage_channels")
         if not has_perms:
+            self._log_action(f"Deleting channel '{params.name}': {error}", False)
             return ToolResult(False, error)
 
         await self.rate_limiter.acquire()
@@ -1671,20 +1677,25 @@ class DiscordArchitect:
         try:
             channel = self._find_channel_by_name(params.name)
             if not channel:
-                return ToolResult(False, f"Channel '{params.name}' not found")
+                msg = f"Channel '{params.name}' not found"
+                self._log_action(f"Deleting channel: {msg}", False)
+                return ToolResult(False, msg)
 
             channel_name = channel.name
             await channel.delete(reason=params.reason)
 
-            return ToolResult(
-                True,
-                f"Deleted channel '{channel_name}'",
-            )
+            msg = f"Deleted channel '{channel_name}'"
+            self._log_action(msg, True)
+            return ToolResult(True, msg)
 
         except Forbidden:
-            return ToolResult(False, "Bot lacks permission to delete channels")
+            msg = "Bot lacks permission to delete channels"
+            self._log_action(f"Deleting channel '{params.name}': {msg}", False)
+            return ToolResult(False, msg)
         except HTTPException as e:
-            return ToolResult(False, f"Discord API error: {e.text}")
+            msg = f"Discord API error: {e.text}"
+            self._log_action(f"Deleting channel '{params.name}': {msg}", False)
+            return ToolResult(False, msg)
 
     async def delete_role(self, params: DeleteRoleParams) -> ToolResult:
         """
@@ -1696,11 +1707,10 @@ class DiscordArchitect:
         Returns:
             ToolResult with success status.
         """
-        self._log_action(f"Deleting role: {params.name}")
-
         # Check permissions
         has_perms, error = self._check_permissions("manage_roles")
         if not has_perms:
+            self._log_action(f"Deleting role '{params.name}': {error}", False)
             return ToolResult(False, error)
 
         await self.rate_limiter.acquire()
@@ -1708,27 +1718,31 @@ class DiscordArchitect:
         try:
             role = self._find_role_by_name(params.name)
             if not role:
-                return ToolResult(False, f"Role '{params.name}' not found")
+                msg = f"Role '{params.name}' not found"
+                self._log_action(f"Deleting role: {msg}", False)
+                return ToolResult(False, msg)
 
             # Check if we can manage this role
             if not self._can_manage_role(role):
-                return ToolResult(
-                    False,
-                    f"Cannot delete role '{params.name}' - it's higher than bot's role"
-                )
+                msg = f"Cannot delete role '{params.name}' - it's higher than bot's role"
+                self._log_action(f"Deleting role: {msg}", False)
+                return ToolResult(False, msg)
 
             role_name = role.name
             await role.delete(reason=params.reason)
 
-            return ToolResult(
-                True,
-                f"Deleted role '{role_name}'",
-            )
+            msg = f"Deleted role '{role_name}'"
+            self._log_action(msg, True)
+            return ToolResult(True, msg)
 
         except Forbidden:
-            return ToolResult(False, "Bot lacks permission to delete roles")
+            msg = "Bot lacks permission to delete roles"
+            self._log_action(f"Deleting role '{params.name}': {msg}", False)
+            return ToolResult(False, msg)
         except HTTPException as e:
-            return ToolResult(False, f"Discord API error: {e.text}")
+            msg = f"Discord API error: {e.text}"
+            self._log_action(f"Deleting role '{params.name}': {msg}", False)
+            return ToolResult(False, msg)
 
     async def delete_category(self, params: DeleteCategoryParams) -> ToolResult:
         """
@@ -1740,11 +1754,10 @@ class DiscordArchitect:
         Returns:
             ToolResult with success status.
         """
-        self._log_action(f"Deleting category: {params.name}")
-
         # Check permissions
         has_perms, error = self._check_permissions("manage_channels")
         if not has_perms:
+            self._log_action(f"Deleting category '{params.name}': {error}", False)
             return ToolResult(False, error)
 
         await self.rate_limiter.acquire()
@@ -1752,7 +1765,9 @@ class DiscordArchitect:
         try:
             category = self._find_channel_by_name(params.name, CategoryChannel)
             if not category:
-                return ToolResult(False, f"Category '{params.name}' not found")
+                msg = f"Category '{params.name}' not found"
+                self._log_action(f"Deleting category: {msg}", False)
+                return ToolResult(False, msg)
 
             category_name = category.name
             deleted_channels = []
@@ -1771,19 +1786,21 @@ class DiscordArchitect:
             await category.delete(reason=params.reason)
 
             if deleted_channels:
-                return ToolResult(
-                    True,
-                    f"Deleted category '{category_name}' and {len(deleted_channels)} channels inside it",
-                )
-            return ToolResult(
-                True,
-                f"Deleted category '{category_name}'",
-            )
+                msg = f"Deleted category '{category_name}' and {len(deleted_channels)} channels inside it"
+            else:
+                msg = f"Deleted category '{category_name}'"
+            
+            self._log_action(msg, True)
+            return ToolResult(True, msg)
 
         except Forbidden:
-            return ToolResult(False, "Bot lacks permission to delete categories")
+            msg = "Bot lacks permission to delete categories"
+            self._log_action(f"Deleting category '{params.name}': {msg}", False)
+            return ToolResult(False, msg)
         except HTTPException as e:
-            return ToolResult(False, f"Discord API error: {e.text}")
+            msg = f"Discord API error: {e.text}"
+            self._log_action(f"Deleting category '{params.name}': {msg}", False)
+            return ToolResult(False, msg)
 
     async def edit_category(self, params: EditCategoryParams) -> ToolResult:
         """
@@ -1795,10 +1812,9 @@ class DiscordArchitect:
         Returns:
             ToolResult with success status.
         """
-        self._log_action(f"Editing category '{params.name}'")
-
         has_perms, error = self._check_permissions("manage_channels")
         if not has_perms:
+            self._log_action(f"Editing category '{params.name}': {error}", False)
             return ToolResult(False, error)
 
         await self.rate_limiter.acquire()
@@ -1806,7 +1822,9 @@ class DiscordArchitect:
         try:
             category = self._find_channel_by_name(params.name, CategoryChannel)
             if not category:
-                return ToolResult(False, f"Category '{params.name}' not found")
+                msg = f"Category '{params.name}' not found"
+                self._log_action(f"Editing category: {msg}", False)
+                return ToolResult(False, msg)
 
             kwargs: dict[str, Any] = {}
 
@@ -1817,20 +1835,25 @@ class DiscordArchitect:
                 kwargs["position"] = params.position
 
             if not kwargs:
-                return ToolResult(False, "No changes specified")
+                msg = "No changes specified"
+                self._log_action(f"Editing category '{params.name}': {msg}", False)
+                return ToolResult(False, msg)
 
             await category.edit(**kwargs)
 
             changes = ", ".join(kwargs.keys())
-            return ToolResult(
-                True,
-                f"Edited category '{params.name}': updated {changes}",
-            )
+            msg = f"Edited category '{params.name}': updated {changes}"
+            self._log_action(msg, True)
+            return ToolResult(True, msg)
 
         except Forbidden:
-            return ToolResult(False, "Bot lacks permission to edit categories")
+            msg = "Bot lacks permission to edit categories"
+            self._log_action(f"Editing category '{params.name}': {msg}", False)
+            return ToolResult(False, msg)
         except HTTPException as e:
-            return ToolResult(False, f"Discord API error: {e.text}")
+            msg = f"Discord API error: {e.text}"
+            self._log_action(f"Editing category '{params.name}': {msg}", False)
+            return ToolResult(False, msg)
 
     async def get_server_info(self) -> ToolResult:
         """
@@ -1839,8 +1862,6 @@ class DiscordArchitect:
         Returns:
             ToolResult with server information.
         """
-        self._log_action("Fetching server information")
-
         try:
             categories = []
             text_channels = []
@@ -1871,9 +1892,11 @@ class DiscordArchitect:
                 if r.name != "@everyone"
             ]
 
+            msg = "Fetched server information"
+            self._log_action(msg, True)
             return ToolResult(
                 True,
-                "Fetched server information",
+                msg,
                 {
                     "name": self.guild.name,
                     "id": self.guild.id,
@@ -1887,7 +1910,9 @@ class DiscordArchitect:
             )
 
         except Exception as e:
-            return ToolResult(False, f"Error fetching server info: {str(e)}")
+            msg = f"Error fetching server info: {str(e)}"
+            self._log_action(msg, False)
+            return ToolResult(False, msg)
 
     async def export_server(self) -> ToolResult:
         """
@@ -1899,8 +1924,6 @@ class DiscordArchitect:
         Returns:
             ToolResult with complete server data as a dictionary.
         """
-        self._log_action("Exporting server structure")
-
         try:
             export_data = {
                 "version": "1.0",
@@ -2008,18 +2031,20 @@ class DiscordArchitect:
             except (Forbidden, HTTPException):
                 logger.warning("Could not export webhooks - missing permissions")
 
-            return ToolResult(
-                True,
+            msg = (
                 f"Exported server structure: {len(export_data['roles'])} roles, "
                 f"{len(export_data['categories'])} categories, "
                 f"{len(export_data['channels'])} channels, "
-                f"{len(export_data['webhooks'])} webhooks",
-                export_data,
+                f"{len(export_data['webhooks'])} webhooks"
             )
+            self._log_action(msg, True)
+            return ToolResult(True, msg, export_data)
 
         except Exception as e:
             logger.exception(f"Error exporting server: {e}")
-            return ToolResult(False, f"Error exporting server: {str(e)}")
+            msg = f"Error exporting server: {str(e)}"
+            self._log_action(msg, False)
+            return ToolResult(False, msg)
 
     async def import_server(self, data: dict, clear_existing: bool = False) -> ToolResult:
         """
@@ -2032,11 +2057,11 @@ class DiscordArchitect:
         Returns:
             ToolResult with import summary.
         """
-        self._log_action("Importing server structure")
-
         try:
             if data.get("version") != "1.0":
-                return ToolResult(False, f"Unsupported export version: {data.get('version')}")
+                msg = f"Unsupported export version: {data.get('version')}"
+                self._log_action(msg, False)
+                return ToolResult(False, msg)
 
             stats = {
                 "roles_created": 0,
@@ -2215,11 +2240,14 @@ class DiscordArchitect:
             if stats["errors"]:
                 summary += f"\n⚠️ {len(stats['errors'])} errors occurred"
 
+            self._log_action(summary, True)
             return ToolResult(True, summary, stats)
 
         except Exception as e:
             logger.exception(f"Error importing server: {e}")
-            return ToolResult(False, f"Error importing server: {str(e)}")
+            msg = f"Error importing server: {str(e)}"
+            self._log_action(msg, False)
+            return ToolResult(False, msg)
 
     async def ask_user(self, params: AskUserParams) -> ToolResult:
         """
@@ -2234,7 +2262,6 @@ class DiscordArchitect:
         Returns:
             ToolResult with the user's answer.
         """
-        self._log_action(f"Asking user: {params.question}")
         logger.debug(f"ask_user called: question='{params.question}', context='{params.context}', options={params.options}")
 
         # Store the pending question
@@ -2256,7 +2283,9 @@ class DiscordArchitect:
         except asyncio.TimeoutError:
             self._pending_question = None
             self._question_event.clear()
-            return ToolResult(False, "User did not respond within 5 minutes")
+            msg = "User did not respond within 5 minutes"
+            self._log_action(f"Asked user: {params.question} - {msg}", False)
+            return ToolResult(False, msg)
 
         # Get the answer
         answer = self._question_answer
@@ -2266,9 +2295,11 @@ class DiscordArchitect:
 
         logger.info(f"User answered: {answer}")
 
+        msg = f"User answered: {answer}"
+        self._log_action(f"Asked user: {params.question} - {msg}", True)
         return ToolResult(
             True,
-            f"User answered: {answer}",
+            msg,
             {"answer": answer},
         )
 
@@ -2343,10 +2374,9 @@ class DiscordArchitect:
         Returns:
             ToolResult with the webhook URL.
         """
-        self._log_action(f"Creating webhook in channel: {params.channel_name}")
-
         has_perms, error = self._check_permissions("manage_webhooks")
         if not has_perms:
+            self._log_action(f"Creating webhook in {params.channel_name} - {error}", False)
             return ToolResult(False, error)
 
         await self.rate_limiter.acquire()
@@ -2354,22 +2384,32 @@ class DiscordArchitect:
         try:
             channel = self._find_channel_by_name(params.channel_name, TextChannel)
             if not channel:
-                return ToolResult(False, f"Channel '{params.channel_name}' not found")
+                msg = f"Channel '{params.channel_name}' not found"
+                self._log_action(f"Creating webhook in {params.channel_name} - {msg}", False)
+                return ToolResult(False, msg)
 
             webhook = await self.get_or_create_webhook(channel, params.webhook_name)
             if not webhook:
-                return ToolResult(False, "Failed to create webhook")
+                msg = "Failed to create webhook"
+                self._log_action(f"Creating webhook in {params.channel_name} - {msg}", False)
+                return ToolResult(False, msg)
 
+            msg = f"Webhook created in #{params.channel_name}"
+            self._log_action(msg, True)
             return ToolResult(
                 True,
-                f"Webhook created in #{params.channel_name}",
+                msg,
                 {"webhook_url": webhook.url, "webhook_id": webhook.id},
             )
 
         except Forbidden:
-            return ToolResult(False, "Bot lacks permission to manage webhooks")
+            msg = "Bot lacks permission to manage webhooks"
+            self._log_action(f"Creating webhook in {params.channel_name} - {msg}", False)
+            return ToolResult(False, msg)
         except HTTPException as e:
-            return ToolResult(False, f"Discord API error: {e.text}")
+            msg = f"Discord API error: {e.text}"
+            self._log_action(f"Creating webhook in {params.channel_name} - {msg}", False)
+            return ToolResult(False, msg)
 
     async def post_webhook_embed(self, params: PostWebhookEmbedParams) -> ToolResult:
         """
@@ -2381,10 +2421,9 @@ class DiscordArchitect:
         Returns:
             ToolResult with success status.
         """
-        self._log_action(f"Posting embed to channel: {params.channel_name}")
-
         has_perms, error = self._check_permissions("manage_webhooks")
         if not has_perms:
+            self._log_action(f"Posting embed to {params.channel_name} - {error}", False)
             return ToolResult(False, error)
 
         await self.rate_limiter.acquire()
@@ -2392,14 +2431,18 @@ class DiscordArchitect:
         try:
             channel = self._find_channel_by_name(params.channel_name, TextChannel)
             if not channel:
-                return ToolResult(False, f"Channel '{params.channel_name}' not found")
+                msg = f"Channel '{params.channel_name}' not found"
+                self._log_action(f"Posting embed to {params.channel_name} - {msg}", False)
+                return ToolResult(False, msg)
 
             webhook = await self.get_or_create_webhook(
                 channel,
                 params.webhook_name or "Envoy",
             )
             if not webhook:
-                return ToolResult(False, "Failed to get/create webhook")
+                msg = "Failed to get/create webhook"
+                self._log_action(f"Posting embed to {params.channel_name} - {msg}", False)
+                return ToolResult(False, msg)
 
             # Parse color
             color = discord.Color.blue()
@@ -2442,16 +2485,22 @@ class DiscordArchitect:
                 wait=True,  # Returns the message so we can get its ID
             )
 
+            msg = f"Posted embed '{params.title}' to #{params.channel_name} | Message ID: {message.id} (save this to edit/delete later)"
+            self._log_action(msg, True)
             return ToolResult(
                 True,
-                f"Posted embed '{params.title}' to #{params.channel_name} | Message ID: {message.id} (save this to edit/delete later)",
+                msg,
                 {"webhook_url": webhook.url, "message_id": message.id, "channel_id": channel.id},
             )
 
         except Forbidden:
-            return ToolResult(False, "Bot lacks permission to use webhooks")
+            msg = "Bot lacks permission to use webhooks"
+            self._log_action(f"Posting embed to {params.channel_name} - {msg}", False)
+            return ToolResult(False, msg)
         except HTTPException as e:
-            return ToolResult(False, f"Discord API error: {e.text}")
+            msg = f"Discord API error: {e.text}"
+            self._log_action(f"Posting embed to {params.channel_name} - {msg}", False)
+            return ToolResult(False, msg)
 
     async def get_channel_webhook(self, params: GetWebhookParams) -> ToolResult:
         """
@@ -2463,10 +2512,9 @@ class DiscordArchitect:
         Returns:
             ToolResult with the webhook URL.
         """
-        self._log_action(f"Getting webhook for channel: {params.channel_name}")
-
         has_perms, error = self._check_permissions("manage_webhooks")
         if not has_perms:
+            self._log_action(f"Getting webhook for {params.channel_name} - {error}", False)
             return ToolResult(False, error)
 
         await self.rate_limiter.acquire()
@@ -2474,22 +2522,32 @@ class DiscordArchitect:
         try:
             channel = self._find_channel_by_name(params.channel_name, TextChannel)
             if not channel:
-                return ToolResult(False, f"Channel '{params.channel_name}' not found")
+                msg = f"Channel '{params.channel_name}' not found"
+                self._log_action(f"Getting webhook for {params.channel_name} - {msg}", False)
+                return ToolResult(False, msg)
 
             webhook = await self.get_or_create_webhook(channel, "Envoy")
             if not webhook:
-                return ToolResult(False, "Failed to get/create webhook")
+                msg = "Failed to get/create webhook"
+                self._log_action(f"Getting webhook for {params.channel_name} - {msg}", False)
+                return ToolResult(False, msg)
 
+            msg = f"Webhook URL for #{params.channel_name}: {webhook.url}"
+            self._log_action(msg, True)
             return ToolResult(
                 True,
-                f"Webhook URL for #{params.channel_name}: {webhook.url}",
+                msg,
                 {"webhook_url": webhook.url, "channel_name": params.channel_name},
             )
 
         except Forbidden:
-            return ToolResult(False, "Bot lacks permission to manage webhooks")
+            msg = "Bot lacks permission to manage webhooks"
+            self._log_action(f"Getting webhook for {params.channel_name} - {msg}", False)
+            return ToolResult(False, msg)
         except HTTPException as e:
-            return ToolResult(False, f"Discord API error: {e.text}")
+            msg = f"Discord API error: {e.text}"
+            self._log_action(f"Getting webhook for {params.channel_name} - {msg}", False)
+            return ToolResult(False, msg)
 
     async def edit_webhook_message(self, params: EditWebhookMessageParams) -> ToolResult:
         """
@@ -2501,10 +2559,9 @@ class DiscordArchitect:
         Returns:
             ToolResult with success status.
         """
-        self._log_action(f"Editing webhook message {params.message_id} in #{params.channel_name}")
-
         has_perms, error = self._check_permissions("manage_webhooks")
         if not has_perms:
+            self._log_action(f"Editing webhook message {params.message_id} in {params.channel_name} - {error}", False)
             return ToolResult(False, error)
 
         await self.rate_limiter.acquire()
@@ -2512,17 +2569,23 @@ class DiscordArchitect:
         try:
             channel = self._find_channel_by_name(params.channel_name, TextChannel)
             if not channel:
-                return ToolResult(False, f"Channel '{params.channel_name}' not found")
+                msg = f"Channel '{params.channel_name}' not found"
+                self._log_action(f"Editing webhook message {params.message_id} in {params.channel_name} - {msg}", False)
+                return ToolResult(False, msg)
 
             webhook = await self.get_or_create_webhook(channel, "Envoy")
             if not webhook:
-                return ToolResult(False, "Failed to get webhook")
+                msg = "Failed to get webhook"
+                self._log_action(f"Editing webhook message {params.message_id} in {params.channel_name} - {msg}", False)
+                return ToolResult(False, msg)
 
             # Fetch the existing message to get current embed
             try:
                 message = await webhook.fetch_message(params.message_id)
             except discord.NotFound:
-                return ToolResult(False, f"Message {params.message_id} not found. Make sure it was posted by the Envoy webhook.")
+                msg = f"Message {params.message_id} not found. Make sure it was posted by the Envoy webhook."
+                self._log_action(f"Editing webhook message {params.message_id} in {params.channel_name} - {msg}", False)
+                return ToolResult(False, msg)
 
             # Get existing embed or create new one
             old_embed = message.embeds[0] if message.embeds else discord.Embed()
@@ -2574,16 +2637,22 @@ class DiscordArchitect:
             # Edit the message
             await webhook.edit_message(params.message_id, embed=embed)
 
+            msg = f"Updated embed in #{params.channel_name} (message ID: {params.message_id})"
+            self._log_action(msg, True)
             return ToolResult(
                 True,
-                f"Updated embed in #{params.channel_name} (message ID: {params.message_id})",
+                msg,
                 {"message_id": params.message_id},
             )
 
         except Forbidden:
-            return ToolResult(False, "Bot lacks permission to edit webhook messages")
+            msg = "Bot lacks permission to edit webhook messages"
+            self._log_action(f"Editing webhook message {params.message_id} in {params.channel_name} - {msg}", False)
+            return ToolResult(False, msg)
         except HTTPException as e:
-            return ToolResult(False, f"Discord API error: {e.text}")
+            msg = f"Discord API error: {e.text}"
+            self._log_action(f"Editing webhook message {params.message_id} in {params.channel_name} - {msg}", False)
+            return ToolResult(False, msg)
 
     async def delete_webhook_message(self, params: DeleteWebhookMessageParams) -> ToolResult:
         """
@@ -2595,10 +2664,9 @@ class DiscordArchitect:
         Returns:
             ToolResult with success status.
         """
-        self._log_action(f"Deleting webhook message {params.message_id} in #{params.channel_name}")
-
         has_perms, error = self._check_permissions("manage_webhooks")
         if not has_perms:
+            self._log_action(f"Deleting webhook message {params.message_id} in {params.channel_name} - {error}", False)
             return ToolResult(False, error)
 
         await self.rate_limiter.acquire()
@@ -2606,26 +2674,38 @@ class DiscordArchitect:
         try:
             channel = self._find_channel_by_name(params.channel_name, TextChannel)
             if not channel:
-                return ToolResult(False, f"Channel '{params.channel_name}' not found")
+                msg = f"Channel '{params.channel_name}' not found"
+                self._log_action(f"Deleting webhook message {params.message_id} in {params.channel_name} - {msg}", False)
+                return ToolResult(False, msg)
 
             webhook = await self.get_or_create_webhook(channel, "Envoy")
             if not webhook:
-                return ToolResult(False, "Failed to get webhook")
+                msg = "Failed to get webhook"
+                self._log_action(f"Deleting webhook message {params.message_id} in {params.channel_name} - {msg}", False)
+                return ToolResult(False, msg)
 
             try:
                 await webhook.delete_message(params.message_id)
             except discord.NotFound:
-                return ToolResult(False, f"Message {params.message_id} not found or already deleted")
+                msg = f"Message {params.message_id} not found or already deleted"
+                self._log_action(f"Deleting webhook message {params.message_id} in {params.channel_name} - {msg}", False)
+                return ToolResult(False, msg)
 
+            msg = f"Deleted message {params.message_id} from #{params.channel_name}"
+            self._log_action(msg, True)
             return ToolResult(
                 True,
-                f"Deleted message {params.message_id} from #{params.channel_name}",
+                msg,
             )
 
         except Forbidden:
-            return ToolResult(False, "Bot lacks permission to delete webhook messages")
+            msg = "Bot lacks permission to delete webhook messages"
+            self._log_action(f"Deleting webhook message {params.message_id} in {params.channel_name} - {msg}", False)
+            return ToolResult(False, msg)
         except HTTPException as e:
-            return ToolResult(False, f"Discord API error: {e.text}")
+            msg = f"Discord API error: {e.text}"
+            self._log_action(f"Deleting webhook message {params.message_id} in {params.channel_name} - {msg}", False)
+            return ToolResult(False, msg)
 
     async def list_webhook_messages(self, params: ListWebhookMessagesParams) -> ToolResult:
         """
@@ -2637,10 +2717,9 @@ class DiscordArchitect:
         Returns:
             ToolResult with list of message IDs and previews.
         """
-        self._log_action(f"Listing webhook messages in #{params.channel_name}")
-
         has_perms, error = self._check_permissions("read_message_history")
         if not has_perms:
+            self._log_action(f"Listing webhook messages in {params.channel_name} - {error}", False)
             return ToolResult(False, error)
 
         await self.rate_limiter.acquire()
@@ -2648,16 +2727,20 @@ class DiscordArchitect:
         try:
             channel = self._find_channel_by_name(params.channel_name, TextChannel)
             if not channel:
-                return ToolResult(False, f"Channel '{params.channel_name}' not found")
+                msg = f"Channel '{params.channel_name}' not found"
+                self._log_action(f"Listing webhook messages in {params.channel_name} - {msg}", False)
+                return ToolResult(False, msg)
 
             # Get webhooks to find Envoy webhook ID
             webhooks = await channel.webhooks()
             envoy_webhook_ids = [wh.id for wh in webhooks if wh.name == "Envoy"]
 
             if not envoy_webhook_ids:
+                msg = f"No Envoy webhook found in #{params.channel_name}"
+                self._log_action(msg, True)
                 return ToolResult(
                     True,
-                    f"No Envoy webhook found in #{params.channel_name}",
+                    msg,
                     {"messages": []},
                 )
 
@@ -2677,9 +2760,11 @@ class DiscordArchitect:
                         break
 
             if not found_messages:
+                msg = f"No Envoy webhook messages found in #{params.channel_name}"
+                self._log_action(msg, True)
                 return ToolResult(
                     True,
-                    f"No Envoy webhook messages found in #{params.channel_name}",
+                    msg,
                     {"messages": []},
                 )
 
@@ -2688,16 +2773,22 @@ class DiscordArchitect:
             for msg in found_messages:
                 lines.append(f"  • ID: {msg['id']} | Title: {msg['title']}")
 
+            msg = "\n".join(lines)
+            self._log_action(f"Listed {len(found_messages)} webhook messages in {params.channel_name}", True)
             return ToolResult(
                 True,
-                "\n".join(lines),
+                msg,
                 {"messages": found_messages},
             )
 
         except Forbidden:
-            return ToolResult(False, "Bot lacks permission to read message history")
+            msg = "Bot lacks permission to read message history"
+            self._log_action(f"Listing webhook messages in {params.channel_name} - {msg}", False)
+            return ToolResult(False, msg)
         except HTTPException as e:
-            return ToolResult(False, f"Discord API error: {e.text}")
+            msg = f"Discord API error: {e.text}"
+            self._log_action(f"Listing webhook messages in {params.channel_name} - {msg}", False)
+            return ToolResult(False, msg)
 
     # ========================================================================
     # Advanced Permission and Channel Management Methods
@@ -2792,10 +2883,9 @@ class DiscordArchitect:
         Returns:
             ToolResult with success status.
         """
-        self._log_action(f"Making channel '{params.channel_name}' private")
-
         has_perms, error = self._check_permissions("manage_channels", "manage_roles")
         if not has_perms:
+            self._log_action(f"Making channel '{params.channel_name}' private - {error}", False)
             return ToolResult(False, error)
 
         await self.rate_limiter.acquire()
@@ -2803,10 +2893,9 @@ class DiscordArchitect:
         try:
             channel = self._find_channel_by_name(params.channel_name)
             if not channel:
-                return ToolResult(
-                    False,
-                    f"Channel '{params.channel_name}' not found"
-                )
+                msg = f"Channel '{params.channel_name}' not found"
+                self._log_action(f"Making channel '{params.channel_name}' private - {msg}", False)
+                return ToolResult(False, msg)
 
             # Deny @everyone if requested
             if params.deny_everyone:
@@ -2844,15 +2933,21 @@ class DiscordArchitect:
                     manage_channels=True,
                 )
 
+            msg = f"Made '{channel.name}' private. Allowed roles: {', '.join(allowed)}"
+            self._log_action(msg, True)
             return ToolResult(
                 True,
-                f"Made '{channel.name}' private. Allowed roles: {', '.join(allowed)}",
+                msg,
             )
 
         except Forbidden:
-            return ToolResult(False, "Bot lacks permission to modify permissions")
+            msg = "Bot lacks permission to modify permissions"
+            self._log_action(f"Making channel '{params.channel_name}' private - {msg}", False)
+            return ToolResult(False, msg)
         except HTTPException as e:
-            return ToolResult(False, f"Discord API error: {e.text}")
+            msg = f"Discord API error: {e.text}"
+            self._log_action(f"Making channel '{params.channel_name}' private - {msg}", False)
+            return ToolResult(False, msg)
 
     async def auto_configure_permissions(
         self,
@@ -2875,11 +2970,11 @@ class DiscordArchitect:
         Returns:
             ToolResult with summary of changes made.
         """
-        self._log_action(f"Auto-configuring permissions with '{params.template}' template")
         logger.info(f"auto_configure_permissions: template={params.template}, staff_roles={params.staff_roles}, info_cats={params.info_categories}, staff_cats={params.staff_categories}")
 
         has_perms, error = self._check_permissions("manage_channels", "manage_roles")
         if not has_perms:
+            self._log_action(f"Auto-configuring permissions with '{params.template}' template - {error}", False)
             return ToolResult(False, error)
 
         try:
@@ -3086,6 +3181,7 @@ class DiscordArchitect:
             
             success_msg = "Permission configuration complete. " + " | ".join(msg_parts)
             
+            self._log_action(f"Auto-configured permissions with '{params.template}' template", True)
             return ToolResult(
                 True,
                 success_msg,
@@ -3093,12 +3189,18 @@ class DiscordArchitect:
             )
 
         except Forbidden:
-            return ToolResult(False, "Bot lacks permission to modify permissions")
+            msg = "Bot lacks permission to modify permissions"
+            self._log_action(f"Auto-configuring permissions with '{params.template}' template - {msg}", False)
+            return ToolResult(False, msg)
         except HTTPException as e:
-            return ToolResult(False, f"Discord API error: {e.text}")
+            msg = f"Discord API error: {e.text}"
+            self._log_action(f"Auto-configuring permissions with '{params.template}' template - {msg}", False)
+            return ToolResult(False, msg)
         except Exception as e:
             logger.exception(f"Error in auto_configure_permissions: {e}")
-            return ToolResult(False, f"Error configuring permissions: {str(e)}")
+            msg = f"Error configuring permissions: {str(e)}"
+            self._log_action(f"Auto-configuring permissions with '{params.template}' template - {msg}", False)
+            return ToolResult(False, msg)
 
     async def move_channel(self, params: MoveChannelParams) -> ToolResult:
         """

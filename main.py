@@ -8,6 +8,7 @@ Discord servers based on natural language commands using the GitHub Copilot SDK.
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import os
@@ -694,7 +695,8 @@ class ContinuationConfirmView(View):
             
             exec_log = architect.get_execution_log()
             if exec_log:
-                self.bot._session_contexts[self.guild_id]["actions"].extend(exec_log)
+                formatted_actions = [f"{msg} {'(failed)' if not success else ''}".strip() for msg, success in exec_log]
+                self.bot._session_contexts[self.guild_id]["actions"].extend(formatted_actions)
             self.bot._session_contexts[self.guild_id]["last_response"] = full_response
 
             await session.destroy()
@@ -1436,8 +1438,7 @@ class EnvoyBot(commands.Bot):
                 exec_log = architect.get_execution_log()
                 tool_count = len(exec_log) if exec_log else 0
                 
-                # Check if mark_complete was called (indicates direct execution)
-                marked_complete = any("Task completed:" in log for log in (exec_log or []))
+                marked_complete = any("Task completed:" in msg for msg, _ in (exec_log or []))
                 
                 # Detect if this is a plan proposal that needs confirmation
                 response_lower = full_response.lower()
@@ -1514,9 +1515,10 @@ class EnvoyBot(commands.Bot):
                 if len(self._session_contexts[guild_id]["changes"]) > 10:
                     self._session_contexts[guild_id]["changes"] = self._session_contexts[guild_id]["changes"][-10:]
                 
-                # Also store execution log for debugging
+                # Store execution log for debugging
                 if exec_log:
-                    self._session_contexts[guild_id]["actions"].extend(exec_log[-20:])  # Keep last 20 only
+                    formatted_actions = [f"{msg} {'(failed)' if not success else ''}".strip() for msg, success in exec_log[-20:]]
+                    self._session_contexts[guild_id]["actions"].extend(formatted_actions)
                 
                 # Store the AI's response
                 self._session_contexts[guild_id]["last_response"] = full_response
@@ -2020,10 +2022,26 @@ class EnvoyBot(commands.Bot):
 
                 exec_response = "".join(execution_chunks)
 
-                # Get execution log
                 exec_log = architect.get_execution_log()
 
-                # Build result embed for better formatting
+                actions_file = None
+                if exec_log:
+                    actions_content = "ENVOY BOT - EXECUTION LOG\n"
+                    actions_content += f"Server: {interaction.guild.name}\n"
+                    actions_content += f"Requested by: {interaction.user.display_name}\n"
+                    actions_content += f"Time: {discord.utils.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
+                    actions_content += f"Total Actions: {len(exec_log)}\n"
+                    actions_content += "=" * 60 + "\n\n"
+                    
+                    for idx, (msg, success) in enumerate(exec_log, 1):
+                        status = "✓" if success else "✗ (failed)"
+                        actions_content += f"{idx}. [{status}] {msg}\n"
+                    
+                    actions_file = discord.File(
+                        fp=io.BytesIO(actions_content.encode('utf-8')),
+                        filename=f"envoy_actions_{int(discord.utils.utcnow().timestamp())}.txt"
+                    )
+
                 embed = discord.Embed(
                     title="✅ Execution Complete",
                     color=discord.Color.green(),
@@ -2035,26 +2053,14 @@ class EnvoyBot(commands.Bot):
                     icon_url=interaction.user.display_avatar.url if interaction.user.display_avatar else None,
                 )
 
-                if exec_log:
-                    log_text = "\n".join(f"• {entry}" for entry in exec_log[:15])
-                    if len(exec_log) > 15:
-                        log_text += f"\n... and {len(exec_log) - 15} more actions"
-                    embed.add_field(
-                        name="📝 Actions Performed",
-                        value=log_text[:1024],
-                        inline=False,
-                    )
-
                 if exec_response:
-                    # Split long summaries into multiple fields (1024 char limit per field)
                     summary_text = exec_response
                     field_num = 0
-                    while summary_text and field_num < 4:  # Max 4 summary fields
+                    while summary_text and field_num < 4:
                         chunk = summary_text[:1020]
-                        # Try to break at a newline for cleaner splits
                         if len(summary_text) > 1020:
                             last_newline = chunk.rfind('\n')
-                            if last_newline > 800:  # Only break at newline if reasonable
+                            if last_newline > 800:
                                 chunk = summary_text[:last_newline]
                         summary_text = summary_text[len(chunk):].lstrip()
                         
@@ -2068,25 +2074,28 @@ class EnvoyBot(commands.Bot):
 
                 embed.add_field(
                     name="📊 Stats",
-                    value=f"Total actions: {len(exec_log)}",
+                    value=f"Total actions: {len(exec_log) if exec_log else 0}",
                     inline=True,
                 )
 
                 embed.set_footer(text="Reply to this message to continue configuring")
 
-                # Send completion summary ONLY to the summary channel
                 if log_channel:
                     try:
-                        summary_msg = await log_channel.send(embed=embed)
-                        # Track summary message for reply-based continuation
+                        if actions_file:
+                            summary_msg = await log_channel.send(embed=embed, file=actions_file)
+                        else:
+                            summary_msg = await log_channel.send(embed=embed)
+                        
                         self._summary_messages[summary_msg.id] = interaction.guild.id
                         self.logger.debug(
                             f"Registered initial architect summary message ID {summary_msg.id} for guild {interaction.guild.id}"
                         )
-                        # Store session context for continuation with improved structure
+                        
                         import time
+                        formatted_actions = [f"{msg} {'(failed)' if not success else ''}".strip() for msg, success in exec_log] if exec_log else []
                         self._session_contexts[interaction.guild.id] = {
-                            "actions": exec_log[-20:] if exec_log else [],  # Keep last 20 only
+                            "actions": formatted_actions[-20:],
                             "changes": [{
                                 "request": prompt,
                                 "summary": exec_response or "Execution completed",
@@ -2097,7 +2106,6 @@ class EnvoyBot(commands.Bot):
                         }
                     except discord.HTTPException as e:
                         self.logger.error(f"Failed to send to log channel: {e}")
-                        # Fallback: try to send via interaction if log channel fails
                         try:
                             await interaction.followup.send(embed=embed)
                         except discord.HTTPException:

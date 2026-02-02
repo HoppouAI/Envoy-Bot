@@ -199,3 +199,4 @@ logs/
 Thumbs.db
 config.yml
 /data
+uv.lock
