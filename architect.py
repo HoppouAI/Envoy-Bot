@@ -949,7 +949,10 @@ class DiscordArchitect:
 
     def _log_action(self, message: str, success: bool = True) -> None:
         """Log an action for tracking."""
-        logger.info(f"[{'SUCCESS' if success else 'FAILED'}] {message}")
+        if success:
+            logger.debug(f"[SUCCESS] {message}")
+        else:
+            logger.error(f"[FAILED] {message}")
         self._execution_log.append((message, success))
 
     def get_execution_log(self) -> list[tuple[str, bool]]:
@@ -978,6 +981,10 @@ class DiscordArchitect:
             return False, "Bot member not found in guild"
 
         permissions = self.bot_member.guild_permissions
+
+        # Administrator grants all permissions implicitly
+        if permissions.administrator:
+            return True, ""
 
         missing = []
         for perm in required:

@@ -84,7 +84,13 @@ def setup_logging(config: dict[str, Any]) -> logging.Logger:
         Configured logger instance.
     """
     log_config = config.get("logging", {})
-    log_level = getattr(logging, log_config.get("level", "INFO").upper())
+    log_level = getattr(logging, log_config.get("level", "INFO").upper(), logging.INFO)
+    # console_level can be set independently from the file level
+    console_level = getattr(
+        logging,
+        log_config.get("console_level", log_config.get("level", "INFO")).upper(),
+        log_level,
+    )
     log_file = log_config.get("file", "logs/envoy.log")
     log_format = log_config.get(
         "format",
@@ -97,17 +103,14 @@ def setup_logging(config: dict[str, Any]) -> logging.Logger:
     log_path = Path(log_file)
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Configure root logger
-    logger = logging.getLogger("envoy")
-    logger.setLevel(log_level)
+    formatter = logging.Formatter(log_format)
 
-    # Console handler
+    # Console handler (uses console_level — can be different from file level)
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(log_level)
-    console_handler.setFormatter(logging.Formatter(log_format))
-    logger.addHandler(console_handler)
+    console_handler.setLevel(console_level)
+    console_handler.setFormatter(formatter)
 
-    # File handler with rotation
+    # File handler with rotation (uses full log_level for maximum detail)
     file_handler = RotatingFileHandler(
         log_file,
         maxBytes=max_size,
@@ -115,8 +118,24 @@ def setup_logging(config: dict[str, Any]) -> logging.Logger:
         encoding="utf-8",
     )
     file_handler.setLevel(log_level)
-    file_handler.setFormatter(logging.Formatter(log_format))
+    file_handler.setFormatter(formatter)
+
+    # Configure the main envoy logger
+    logger = logging.getLogger("envoy")
+    logger.setLevel(log_level)
+    logger.addHandler(console_handler)
     logger.addHandler(file_handler)
+
+    # Also capture discord.py library logs (Forbidden/HTTP errors etc.)
+    discord_lib_level = getattr(
+        logging,
+        log_config.get("discord_lib_level", "WARNING").upper(),
+        logging.WARNING,
+    )
+    discord_logger = logging.getLogger("discord")
+    discord_logger.setLevel(discord_lib_level)
+    discord_logger.addHandler(console_handler)
+    discord_logger.addHandler(file_handler)
 
     return logger
 
@@ -662,6 +681,7 @@ class ContinuationConfirmView(View):
                 "streaming": True,
                 "tools": tools,
                 "system_message": {"content": system_message} if system_message else None,
+                "on_permission_request": self.bot._approve_copilot_permission_request,
             })
 
             response_chunks: list[str] = []
@@ -824,6 +844,7 @@ class ContinuationConfirmView(View):
                         "streaming": True,
                         "tools": tools,
                         "system_message": {"content": system_message} if system_message else None,
+                        "on_permission_request": self.bot._approve_copilot_permission_request,
                     })
 
                     response_chunks: list[str] = []
@@ -1129,6 +1150,29 @@ class EnvoyBot(commands.Bot):
                 return pat.pattern
         return None
 
+    async def _approve_copilot_permission_request(
+        self,
+        request: Any,
+        _context: dict[str, str],
+    ) -> dict[str, Any]:
+        """
+        Approve Copilot runtime permission requests for agent tool usage.
+
+        The Copilot SDK runtime may request permission for tool classes
+        (read/write/url/shell/mcp). For Envoy, tools are app-owned operations,
+        so we explicitly approve to prevent silent runtime denials.
+        """
+        try:
+            kind = getattr(request, "kind", "unknown")
+            tool_call_id = getattr(request, "toolCallId", "unknown")
+            self.logger.debug(
+                f"Copilot permission request approved: kind={kind}, toolCallId={tool_call_id}"
+            )
+        except Exception:
+            self.logger.debug("Copilot permission request approved")
+
+        return {"kind": "approved", "rules": []}
+
     async def setup_hook(self) -> None:
         """Set up the bot before it starts."""
         self.logger.info("Setting up Envoy bot...")
@@ -1355,6 +1399,7 @@ class EnvoyBot(commands.Bot):
                     "streaming": True,
                     "tools": tools,
                     "system_message": {"content": system_message} if system_message else None,
+                    "on_permission_request": self._approve_copilot_permission_request,
                 })
 
                 response_chunks: list[str] = []
@@ -1730,6 +1775,7 @@ class EnvoyBot(commands.Bot):
                 "streaming": streaming,
                 "tools": tools,
                 "system_message": {"content": system_message} if system_message else None,
+                "on_permission_request": self._approve_copilot_permission_request,
             })
 
             # Collect the response
@@ -2020,50 +2066,113 @@ class EnvoyBot(commands.Bot):
                         
                         await asyncio.sleep(0.5)  # Check every 500ms
 
-                # Start the question handler as a background task
-                question_task = asyncio.create_task(handle_questions())
+                async def run_execution_prompt(execution_prompt: str, timeout_seconds: float = 300.0) -> tuple[str, list[tuple[str, bool]], bool]:
+                    """Run an execution prompt and return (response, execution_log, timed_out)."""
+                    nonlocal execution_chunks, exec_done
 
-                await session.send({
-                    "prompt": (
-                        "The user has confirmed the plan. Execute it now using the available tools.\n\n"
-                        "IMPORTANT - Progress Tracking:\n"
-                        "1. FIRST call set_plan() with a title and list of task names\n"
-                        "2. Before each major operation, call update_task() with status='in_progress'\n"
-                        "3. After each operation completes, call update_task() with status='completed' or 'failed'\n"
-                        "4. This updates a live progress embed visible to the server owner\n\n"
-                        "If you need clarification, use ask_user() - a popup will appear for the user to answer.\n\n"
-                        "Example workflow:\n"
-                        "- set_plan(title='Gaming Server', tasks=['Create roles', 'Create categories', 'Set permissions'])\n"
-                        "- update_task(task_id=1, status='in_progress')\n"
-                        "- create_role(...)\n"
-                        "- update_task(task_id=1, status='completed')\n"
-                        "- update_task(task_id=2, status='in_progress')\n"
-                        "- etc."
+                    # Reset collectors for this execution pass
+                    execution_chunks = []
+                    exec_done = asyncio.Event()
+
+                    # Start the question handler as a background task
+                    question_task = asyncio.create_task(handle_questions())
+
+                    await session.send({"prompt": execution_prompt})
+
+                    timed_out = False
+                    try:
+                        await asyncio.wait_for(exec_done.wait(), timeout=timeout_seconds)
+                    except asyncio.TimeoutError:
+                        timed_out = True
+                        timeout_msg = "⏰ Execution timed out."
+                        try:
+                            await interaction.followup.send(timeout_msg)
+                        except discord.HTTPException:
+                            if log_channel:
+                                await log_channel.send(timeout_msg)
+                    finally:
+                        # Cancel the question handler task
+                        question_task.cancel()
+                        try:
+                            await question_task
+                        except asyncio.CancelledError:
+                            pass
+                        # Clear any pending question state
+                        architect.clear_question_state()
+
+                    return "".join(execution_chunks), architect.get_execution_log(), timed_out
+
+                initial_execution_prompt = (
+                    "The user has confirmed the plan. Execute it now using the available tools.\n\n"
+                    "IMPORTANT - Progress Tracking:\n"
+                    "1. FIRST call set_plan() with a title and list of task names\n"
+                    "2. Before each major operation, call update_task() with status='in_progress'\n"
+                    "3. After each operation completes, call update_task() with status='completed' or 'failed'\n"
+                    "4. This updates a live progress embed visible to the server owner\n\n"
+                    "If you need clarification, use ask_user() - a popup will appear for the user to answer.\n\n"
+                    "Example workflow:\n"
+                    "- set_plan(title='Gaming Server', tasks=['Create roles', 'Create categories', 'Set permissions'])\n"
+                    "- update_task(task_id=1, status='in_progress')\n"
+                    "- create_role(...)\n"
+                    "- update_task(task_id=1, status='completed')\n"
+                    "- update_task(task_id=2, status='in_progress')\n"
+                    "- etc."
+                )
+
+                exec_response, exec_log, exec_timed_out = await run_execution_prompt(initial_execution_prompt)
+
+                # Safety net: if model produced text only and never used tools, force one retry
+                if not exec_log and not exec_timed_out:
+                    self.logger.warning(
+                        f"[ARCHITECT] Execution finished with 0 tool calls. "
+                        f"Guild: {interaction.guild.name} | User: {interaction.user} | "
+                        f"Prompt: {prompt[:200]!r} | "
+                        f"AI response (first 800 chars): {exec_response[:800]!r}"
                     )
-                })
 
-                try:
-                    await asyncio.wait_for(exec_done.wait(), timeout=300.0)
-                except asyncio.TimeoutError:
-                    timeout_msg = "⏰ Execution timed out."
-                    try:
-                        await interaction.followup.send(timeout_msg)
-                    except discord.HTTPException:
-                        if log_channel:
-                            await log_channel.send(timeout_msg)
-                finally:
-                    # Cancel the question handler task
-                    question_task.cancel()
-                    try:
-                        await question_task
-                    except asyncio.CancelledError:
-                        pass
-                    # Clear any pending question state
-                    architect.clear_question_state()
+                    strict_retry_prompt = (
+                        "CRITICAL: Your previous response did NOT call any tools.\n"
+                        "You must execute now by calling tools, not by describing actions.\n\n"
+                        "Rules:\n"
+                        "1) FIRST call set_plan(...)\n"
+                        "2) Then call actual execution tools (create_role/create_channel/create_category/etc.)\n"
+                        "3) Use update_task(...) around each major step\n"
+                        "4) Do NOT claim permissions problems unless you attempted the tool and received a ❌ error\n"
+                        "5) If a tool fails, continue with remaining tasks where possible\n"
+                        "6) When done, summarize exactly what you created/changed\n\n"
+                        "Begin execution immediately."
+                    )
 
-                exec_response = "".join(execution_chunks)
+                    retry_response, retry_log, retry_timed_out = await run_execution_prompt(
+                        strict_retry_prompt,
+                        timeout_seconds=240.0,
+                    )
 
-                exec_log = architect.get_execution_log()
+                    if retry_log:
+                        exec_response = retry_response
+                        exec_log = retry_log
+                        self.logger.info(
+                            f"[ARCHITECT] Zero-tool retry succeeded: {len(exec_log)} actions, "
+                            f"{sum(1 for _, s in exec_log if s)} succeeded, "
+                            f"{sum(1 for _, s in exec_log if not s)} failed"
+                        )
+                    elif not retry_timed_out:
+                        self.logger.error(
+                            f"[ARCHITECT] Retry also produced 0 tool calls. "
+                            f"Guild: {interaction.guild.name} | User: {interaction.user} | "
+                            f"Retry response (first 800 chars): {retry_response[:800]!r}"
+                        )
+                        exec_response = (
+                            "I couldn't execute because the model failed to call Discord tools twice in a row. "
+                            "Please run the command again; this incident has been logged for debugging."
+                        )
+
+                if exec_log:
+                    self.logger.info(
+                        f"[ARCHITECT] Execution complete: {len(exec_log)} actions, "
+                        f"{sum(1 for _, s in exec_log if s)} succeeded, "
+                        f"{sum(1 for _, s in exec_log if not s)} failed"
+                    )
 
                 actions_file = None
                 if exec_log:
